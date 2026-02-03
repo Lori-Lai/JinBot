@@ -1,0 +1,12 @@
+nodes:
+  - id: feetech_driver
+    build: cargo build --package feetech_driver
+    path: ./target/debug/feetech_driver
+    inputs:
+      write_goal_position: dora/timer/millis/5
+      read_current_position: dora/timer/millis/5
+    outputs:
+      - status
+    env:
+      PORT: /dev/ttyACM0
+      CONFIG: ./config/feetech.json
