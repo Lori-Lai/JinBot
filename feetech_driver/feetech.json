@@ -1,0 +1,10 @@
+{
+  "shoulder_pan": {
+    "id": 1,
+    "motor_type": "sts3215"
+  },
+  "elbow": {
+    "id": 5,
+    "motor_type": "sts3215"
+  }
+}

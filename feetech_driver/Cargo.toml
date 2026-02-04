@@ -13,3 +13,14 @@ rustypot = "1.4.2"
 serialport = "4.8.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+dora-core = "0.4.1"
+dora-message = "0.7.0"
+dora-arrow-convert = "0.4.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+common = { path = "../common" }
+arrow = "54"
+rand = "0.8"
+
+[dev-dependencies]
+serde_json = "1.0"

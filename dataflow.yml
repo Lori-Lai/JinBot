@@ -1,12 +1,16 @@
+_unstable_debug:
+  publish_all_messages_to_zenoh: true
+
 nodes:
   - id: feetech_driver
     build: cargo build --package feetech_driver
     path: ./target/debug/feetech_driver
     inputs:
-      write_goal_position: dora/timer/millis/5
-      read_current_position: dora/timer/millis/5
+      goal_position: dora/timer/millis/5
+      pull_present_position: dora/timer/millis/50
     outputs:
-      - status
+      - present_position
     env:
       PORT: /dev/ttyACM0
-      CONFIG: ./config/feetech.json
+      BAUDRATE: 1000000
+      CONFIG_PATH: ./feetech_driver/feetech.json

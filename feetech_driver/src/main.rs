@@ -1,119 +1,112 @@
-use std::{
-    collections::HashMap,
-    env,
-    f64::consts::PI,
-    fs,
-    path::PathBuf,
-    time::Duration,
-};
+mod config;
+mod controller;
+mod display;
+mod handlers;
+mod motors;
 
-use eyre::Result;
+use std::collections::HashMap;
+
+use common::logging::{init_tracing, rate_limited_warn, WarnCounter};
+use dora_core::config::DataId;
 use dora_node_api::{DoraNode, Event};
-use rustypot::servo::feetech::sts3215::Sts3215Controller;
-use serde::Deserialize;
+use eyre::Result;
+use tracing::{error, warn};
 
-#[derive(Debug, Deserialize)]
-struct MotorConfig {
-    id: u8,
-    model: String,
-    torque: bool,
-}
-
+use controller::{log_ping, open_and_ping};
+use display::{log_motors, log_settings};
+use handlers::{handle_control, publish_status};
 fn main() -> Result<()> {
-    println!("Starting Feetech Driver...");
+    // ────────────── 引导阶段：初始化日志 & 读取配置 ──────────────
+    init_tracing();
+    let settings = config::load_settings();
+    log_settings(&settings);
 
-    // Allow overriding the motor config path via env; default to repo-level config/motor.json
-    let default_config: PathBuf =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../config/motor.json");
-    let config_path = env::var("MOTOR_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or(default_config);
+    // ────────────── 配置舵机列表 ──────────────
+    let motors = motors::load_motors(&settings.config_path)?;
+    log_motors(&motors);
 
-    let json = fs::read_to_string(&config_path)?;
-    let motors: HashMap<String, MotorConfig> = serde_json::from_str(&json)?;
-    println!(
-        "Loaded motor config from {} ({} motors)",
-        config_path.display(),
-        motors.len()
-    );
-    for (name, cfg) in &motors {
-        println!("- {name}: id={}, model={}, torque={}", cfg.id, cfg.model, cfg.torque);
-    }
+    // ────────────── 硬件准备：打开串口并 ping ──────────────
+    let mut controller = log_ping(open_and_ping(&settings, &motors));
 
-    let serial_port = serialport::new(
-        env::var("PORT").unwrap_or_else(|_| "/dev/ttyACM0".to_string()),
-        1_000_000,
-    )
-    .timeout(Duration::from_millis(1000))
-    .open()?;
+    // ────────────── 事件循环：处理控制 & 定时发布状态 ──────────────
+    let status_output = DataId::from("present_position".to_owned());
+    let (mut node, mut events) = DoraNode::init_from_env()?;
+    let mut ignored: HashMap<String, WarnCounter> = HashMap::new();
 
-    let mut controller = Sts3215Controller::new()
-        .with_protocol_v1()
-        .with_serial_port(serial_port);
-
-    // Track last commanded goal per motor (radians) and scan direction (+1 or -1) to avoid jumps.
-    let mut last_goal_rad: HashMap<u8, f64> = motors.values().map(|cfg| (cfg.id, 0.0)).collect();
-    let mut dir: HashMap<u8, i8> = motors.values().map(|cfg| (cfg.id, 1)).collect(); // 1=up, -1=down
-
-    // Dora event loop
-    let (_node, mut events) = DoraNode::init_from_env()?;
     while let Some(event) = events.recv() {
         match event {
-            Event::Input { id, .. } => match id.as_str() {
-                // Ping-pong each motor by 1 degree (in radians) between [-PI, PI], avoiding wrap jumps.
-                "write_goal_position" => {
-                    const STEP_DEG: f64 = 1.0;
-                    let step_rad = STEP_DEG.to_radians();
-                    const MIN_RAD: f64 = -PI;
-                    const MAX_RAD: f64 = PI;
-
-                    let ids: Vec<u8> = motors.values().map(|m| m.id).collect();
-                    let mut goals: Vec<f64> = Vec::with_capacity(ids.len());
-                    for motor_id in &ids {
-                        let current = *last_goal_rad.get(motor_id).unwrap_or(&0.0);
-                        let d = *dir.get(motor_id).unwrap_or(&1) as f64;
-                        let mut next = current + d * step_rad;
-                        let mut new_dir = d;
-
-                        if next >= MAX_RAD {
-                            next = MAX_RAD;
-                            new_dir = -1.0;
-                        } else if next <= MIN_RAD {
-                            next = MIN_RAD;
-                            new_dir = 1.0;
+            Event::Input { id, data, .. } => match id.as_str() {
+                "goal_position" => {
+                    if let Err(e) = handle_control(&motors, &mut controller, &data) {
+                        let emitted = rate_limited_warn(&mut ignored, "goal_position_error");
+                        if emitted {
+                            error!("Failed to handle control data: {e:?}");
                         }
-
-                        last_goal_rad.insert(*motor_id, next);
-                        dir.insert(*motor_id, new_dir as i8);
-                        goals.push(next);
-                    }
-                    if let Err(e) = controller.sync_write_goal_position(&ids, &goals) {
-                        eprintln!("⚠️ write_goal_position failed: {e}");
-                    } else {
-                        println!("Wrote goals (radians): {:?}", goals);
+                        controller = controller::reopen_with_backoff(&settings, &motors);
                     }
                 }
-                // Read present positions and print
-                "read_current_position" => {
-                    let ids: Vec<u8> = motors.values().map(|m| m.id).collect();
-                    match controller.sync_read_present_position(&ids) {
-                        Ok(positions) => {
-                            for (i, pos) in ids.iter().zip(positions.iter()) {
-                                let degrees = pos.to_degrees();
-                                println!("Motor {i} position: {:.3} rad ({:.2}°)", pos, degrees);
-                            }
+                "pull_present_position" => {
+                    if let Err(e) =
+                        publish_status(&motors, &mut controller, &mut node, &status_output)
+                    {
+                        let emitted = rate_limited_warn(&mut ignored, "status_error");
+                        if emitted {
+                            error!("Failed to publish status: {e:?}");
                         }
-                        Err(e) => {
-                            eprintln!("⚠️ read_current_position failed: {e}");
-                        }
+                        controller = controller::reopen_with_backoff(&settings, &motors);
                     }
                 }
-                other => eprintln!("ignoring unexpected input {other}"),
+                other => {
+                    warn!("Received data on unknown input ID: {}", other);
+                }
             },
             Event::Stop(_) => break,
-            _ => {}
+            other => {
+                warn!("received unexpected event {other:?}");
+            }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dora_message::metadata::MetadataParameters;
+
+    // 简单单元测试：构造一个 StructArray，字段 joint_name/value，确保 send_output 接口可接受。
+    #[test]
+    fn build_status_payload_shape() {
+        let joints = vec!["j1".to_string(), "j2".to_string()];
+        let values = vec![1.23_f64, 4.56_f64];
+
+        let fields_and_arrays: Vec<(Arc<Field>, ArrayRef)> = vec![
+            (
+                Arc::new(Field::new("joint_name", DataType::Utf8, false)),
+                Arc::new(StringArray::from(joints)) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", DataType::Float64, false)),
+                Arc::new(Float64Array::from(values)) as ArrayRef,
+            ),
+        ];
+
+        let struct_array = StructArray::from(fields_and_arrays);
+        // Verify schema
+        let fields = struct_array.fields();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name(), "joint_name");
+        assert_eq!(fields[1].name(), "value");
+        // Check lengths match
+        assert_eq!(struct_array.len(), 2);
+
+        // Dummy send_output signature check (type only)
+        fn send_like(node: &mut DoraNode, id: DataId, arr: StructArray) {
+            let _ = node.send_output(id, MetadataParameters::default(), arr);
+        }
+
+        // we can't call without real DoraNode; compile-time type check only
+        let _ = ();
+    }
 }
