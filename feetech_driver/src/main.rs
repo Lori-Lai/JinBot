@@ -73,6 +73,10 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use arrow::array::{Array, ArrayRef, Float64Array, StringArray, StructArray};
+    use arrow::datatypes::{DataType, Field};
     use dora_message::metadata::MetadataParameters;
 
     // 简单单元测试：构造一个 StructArray，字段 joint_name/value，确保 send_output 接口可接受。
