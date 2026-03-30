@@ -3,3 +3,8 @@ out/
 Cargo.lock
 venv/
 __pycache__/
+.codex
+env_isaaclab/
+robot/.env
+robot/*.ppm
+robot/preview*.png

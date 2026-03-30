@@ -1,4 +1,7 @@
 {
-	"url": "https://cad.onshape.com/documents/1ba0590d9c30dce016cf6a88/w/a6739e4b1d1c5be1c5b79663/e/bed74cb9519e3eabc367256a",
-	"output_format": "urdf"
+  "url": "https://cad.onshape.com/documents/e02f5fb50c89b17d739769f5/w/a43b0944fb74c88b20fb0815/e/ccc38796d9dea9f024ca719e",
+  "output_format": "urdf",
+  "output_filename": "robot",
+  "assets_directory": "assets",
+  "robot_name": "JinBot"
 }
